@@ -28,6 +28,7 @@ class RuntimeConfigUpdate(BaseModel):
     api_secret: Optional[str] = None
     symbol_limit: Optional[int] = None
     min_quote_volume_usdt: Optional[float] = None
+    paper_equity: Optional[float] = None
 
 
 @asynccontextmanager
@@ -64,6 +65,25 @@ async def analytics():
     return engine.state().get("analytics", {})
 
 
+@app.get("/api/trades")
+async def trades(limit: int = 20):
+    # Read last N trade events from persistent journal (if present).
+    limit = max(1, min(500, int(limit)))
+    path = getattr(engine, 'journal_path', None)
+    if not path:
+        return {"ok": False, "error": "journal_not_configured", "trades": []}
+    try:
+        p = Path(path)
+        if not p.exists():
+            return {"ok": True, "trades": []}
+        lines = p.read_text(encoding="utf-8").splitlines()
+        tail = lines[-limit:]
+        import json
+        return {"ok": True, "trades": [json.loads(x) for x in tail if x.strip()]}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "trades": []}
+
+
 @app.get("/api/universe")
 async def universe():
     st = engine.state()
@@ -77,6 +97,7 @@ async def get_config():
         "leverage_default": settings.leverage_default,
         "symbol_limit": settings.symbol_limit,
         "min_quote_volume_usdt": settings.min_quote_volume_usdt,
+        "paper_equity": settings.starting_equity,
         "has_api_key": bool(settings.api_key),
         "binance_testnet": settings.binance_testnet,
     }
@@ -110,6 +131,18 @@ async def update_config(payload: RuntimeConfigUpdate):
         settings.min_quote_volume_usdt = max(0.0, float(payload.min_quote_volume_usdt))
         engine.cfg.min_quote_volume_usdt = settings.min_quote_volume_usdt
 
+    if payload.paper_equity is not None:
+        pe = max(1.0, float(payload.paper_equity))
+        settings.starting_equity = pe
+        engine.cfg.starting_equity = pe
+        if settings.app_mode == "paper":
+            engine.initial_equity = pe
+            engine.equity = pe
+            engine.realized_pnl = 0.0
+            engine.positions = []
+            engine.closed_trades = []
+            engine._log(f"Paper equity reset to {pe:.2f} USDT")
+
     if payload.api_key:
         settings.api_key = payload.api_key.strip()
     if payload.api_secret:
@@ -129,6 +162,18 @@ async def update_config(payload: RuntimeConfigUpdate):
 
     engine._log("Runtime config updated")
     return {"ok": True, **(await get_config())}
+
+
+@app.post("/api/trading/start")
+async def trading_start():
+    await engine.start_trading()
+    return {"ok": True, "trading_enabled": True}
+
+
+@app.post("/api/trading/stop")
+async def trading_stop():
+    await engine.stop_trading()
+    return {"ok": True, "trading_enabled": False}
 
 
 @app.websocket("/ws/state")

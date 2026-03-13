@@ -7,6 +7,9 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from statistics import mean
 
+import json
+from pathlib import Path
+
 from app.risk.capital import calc_position_size
 
 
@@ -63,11 +66,26 @@ class TradingEngine:
         self.realized_pnl = 0.0
         self.total_scans = 0
         self._lock = asyncio.Lock()
+        self.trading_enabled = True
+
+        # Persistent trade journal (so we can report trades without relying on in-memory state)
+        monitoring_dir = Path(__file__).resolve().parents[2] / 'monitoring'
+        monitoring_dir.mkdir(parents=True, exist_ok=True)
+        self.journal_path = monitoring_dir / 'trade_journal.jsonl'
 
     def _log(self, msg: str):
         ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
         self.events.append(f"[{ts}] {msg}")
         self.events = self.events[-400:]
+
+    def _journal(self, event: str, payload: dict):
+        try:
+            rec = {'ts': time.time(), 'event': event, **payload}
+            with open(self.journal_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + '\n')
+        except Exception as e:
+            # Never crash trading loop due to logging.
+            self._log(f'Journal error: {e}')
 
     @property
     def floating_pnl(self) -> float:
@@ -186,6 +204,7 @@ class TradingEngine:
                 return
             self.positions.append(pos)
         self._log(f"OPEN {symbol} {pos.side} rr={pos.rr:.2f} qty={qty:.5f} lev={lev}x")
+        self._journal('OPEN', {'id': pos.id, 'symbol': pos.symbol, 'side': pos.side, 'entry': pos.entry_price, 'stop': pos.stop_loss, 'tp': pos.take_profit, 'qty': pos.qty, 'lev': pos.leverage, 'rr': pos.rr, 'reason': pos.reason})
 
     def _close_position(self, pos: Position, exit_price: float, reason: str):
         pnl = (exit_price - pos.entry_price) * pos.qty if pos.side == "LONG" else (pos.entry_price - exit_price) * pos.qty
@@ -213,6 +232,7 @@ class TradingEngine:
         )
         self.closed_trades = self.closed_trades[-1000:]
         self._log(f"CLOSE {pos.symbol} {reason} pnl={pnl:.2f} ({pnl_pct:.2f}%)")
+        self._journal('CLOSE', {'id': pos.id, 'symbol': pos.symbol, 'side': pos.side, 'entry': pos.entry_price, 'exit': exit_price, 'qty': pos.qty, 'lev': pos.leverage, 'pnl_usdt': pnl, 'pnl_pct': pnl_pct, 'exit_reason': reason})
 
     async def _mark_and_manage_positions(self):
         if not self.positions:
@@ -245,6 +265,7 @@ class TradingEngine:
     def _analytics(self):
         trades = self.closed_trades
         wins = [t for t in trades if t.pnl_usdt > 0]
+        losses = [t for t in trades if t.pnl_usdt < 0]
         days = defaultdict(int)
         for t in trades:
             d = datetime.fromtimestamp(t.closed_at, tz=timezone.utc).strftime("%Y-%m-%d")
@@ -263,12 +284,42 @@ class TradingEngine:
             dd = (peak - v)
             max_dd = max(max_dd, dd)
 
+        current_win_streak = 0
+        current_loss_streak = 0
+        max_win_streak = 0
+        max_loss_streak = 0
+        for t in trades:
+            if t.pnl_usdt > 0:
+                current_win_streak += 1
+                current_loss_streak = 0
+            elif t.pnl_usdt < 0:
+                current_loss_streak += 1
+                current_win_streak = 0
+            else:
+                current_win_streak = 0
+                current_loss_streak = 0
+            max_win_streak = max(max_win_streak, current_win_streak)
+            max_loss_streak = max(max_loss_streak, current_loss_streak)
+
+        avg_win = mean([t.pnl_usdt for t in wins]) if wins else 0.0
+        avg_loss = mean([t.pnl_usdt for t in losses]) if losses else 0.0
+        winrate = (len(wins) / len(trades) * 100.0) if trades else 0.0
+        lossrate = 100.0 - winrate if trades else 0.0
+        expectancy = ((winrate / 100.0) * avg_win) + ((lossrate / 100.0) * avg_loss)
+
         return {
             "total_trades": len(trades),
-            "winrate": (len(wins) / len(trades) * 100.0) if trades else 0.0,
+            "winrate": winrate,
+            "avg_win": avg_win,
+            "avg_loss": avg_loss,
+            "expectancy": expectancy,
             "cumulative_pnl": self.realized_pnl,
             "max_drawdown_usdt": max_dd,
             "trades_per_day": round(mean(days.values()), 2) if days else 0.0,
+            "current_win_streak": current_win_streak,
+            "current_loss_streak": current_loss_streak,
+            "max_win_streak": max_win_streak,
+            "max_loss_streak": max_loss_streak,
             "equity_curve": curve[-300:],
             "pnl_history": [t.pnl_usdt for t in trades[-300:]],
         }
@@ -282,8 +333,9 @@ class TradingEngine:
             while self.running:
                 try:
                     await self._mark_and_manage_positions()
-                    await self._scan_entries()
-                    self.total_scans += 1
+                    if self.trading_enabled:
+                        await self._scan_entries()
+                        self.total_scans += 1
                 except Exception as e:
                     self._log(f"Cycle error: {e}")
                 await asyncio.sleep(self.cfg.poll_interval_sec)
@@ -291,12 +343,41 @@ class TradingEngine:
             universe_task.cancel()
             self._log("Engine stopped")
 
+    async def start_trading(self):
+        self.trading_enabled = True
+
+        # Persistent trade journal (so we can report trades without relying on in-memory state)
+        monitoring_dir = Path(__file__).resolve().parents[2] / 'monitoring'
+        monitoring_dir.mkdir(parents=True, exist_ok=True)
+        self.journal_path = monitoring_dir / 'trade_journal.jsonl'
+        self._log("Trading STARTED")
+
+    async def stop_trading(self):
+        self.trading_enabled = False
+        prices = await self.market.get_all_prices()
+        async with self._lock:
+            to_close = self.positions[:]
+            self.positions = []
+        for p in to_close:
+            px = prices.get(p.symbol, p.entry_price)
+            self._close_position(p, px, "MANUAL_STOP")
+        self._log(f"Trading STOPPED. Closed positions: {len(to_close)}")
+
     def stop(self):
         self.running = False
 
     def state(self):
+        positions = []
+        for p in self.positions:
+            item = asdict(p)
+            mark_price = self.last_prices.get(p.symbol)
+            item["mark_price"] = mark_price
+            item["status"] = "PROFIT" if p.unrealized_pnl > 0 else "LOSS" if p.unrealized_pnl < 0 else "FLAT"
+            positions.append(item)
+
         return {
             "mode": self.cfg.app_mode,
+            "trading_enabled": self.trading_enabled,
             "equity": self.equity,
             "equity_total": self.equity_total,
             "realized_pnl": self.realized_pnl,
@@ -304,7 +385,7 @@ class TradingEngine:
             "open_positions": len(self.positions),
             "universe_size": len(self.universe),
             "total_scans": self.total_scans,
-            "positions": [asdict(p) for p in self.positions],
+            "positions": positions,
             "closed_trades": [asdict(t) for t in self.closed_trades[-100:]],
             "analytics": self._analytics(),
             "events": self.events,

@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Binance USDT-M Pro Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root{--bg:#0b1020;--card:#121a30;--line:#24314f;--txt:#e9eefc;--muted:#97a6cc;--ok:#22c55e;--bad:#ef4444}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--txt);font-family:Inter,Segoe UI,Arial,sans-serif;padding:14px}
+    .grid{display:grid;gap:10px}.top{grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px}
+    .label{font-size:12px;color:var(--muted)}.value{font-size:22px;font-weight:700}.small{font-size:12px}
+    input,select,button{width:100%;padding:8px;border-radius:8px;border:1px solid var(--line);background:#0b1326;color:var(--txt)}button{background:#2b63ff;border:none;cursor:pointer}
+    .controls{grid-template-columns:repeat(auto-fit,minmax(210px,1fr));margin-top:10px}.tables{grid-template-columns:1.2fr .8fr;margin-top:10px}
+    table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:6px;border-bottom:1px solid #1d2944;text-align:left}
+    .good{color:var(--ok)}.bad{color:var(--bad)}
+    .log{max-height:230px;overflow:auto;font-size:12px;line-height:1.35}
+  </style>
+</head>
+<body>
+  <div class="grid top">
+    <div class="card"><div class="label">MODE</div><div class="value" id="mode">-</div></div>
+    <div class="card"><div class="label">EQUITY TOTAL</div><div class="value" id="equityTotal">-</div></div>
+    <div class="card"><div class="label">REALIZED PnL</div><div class="value" id="realizedPnl">-</div></div>
+    <div class="card"><div class="label">FLOATING PnL</div><div class="value" id="floatingPnl">-</div></div>
+    <div class="card"><div class="label">OPEN TRADES / UNIVERSE</div><div class="value" id="ops">-</div></div>
+    <div class="card"><div class="label">WINRATE / DD</div><div class="value" id="wrdd">-</div></div>
+  </div>
+
+  <div class="card">
+    <div class="grid controls">
+      <div><div class="label">Leverage</div><select id="leverage"></select></div>
+      <div><div class="label">Universe Symbols Limit</div><input id="symbolLimit" type="number" min="5" max="200"/></div>
+      <div><div class="label">Min 24h Quote Vol (USDT)</div><input id="minVol" type="number"/></div>
+      <div><div class="label">API Key</div><input id="apiKey" placeholder="BINANCE_API_KEY"/></div>
+      <div><div class="label">API Secret</div><input id="apiSecret" type="password" placeholder="BINANCE_API_SECRET"/></div>
+      <div>
+        <div class="label">Actions</div>
+        <button onclick="setMode('paper')">Switch PAPER</button>
+        <button style="margin-top:6px" onclick="setMode('real')">Switch REAL</button>
+        <button style="margin-top:6px" onclick="saveConfig()">Save Config</button>
+      </div>
+    </div>
+    <div id="status" class="small" style="margin-top:8px;color:var(--muted)"></div>
+  </div>
+
+  <div class="grid" style="grid-template-columns:1fr 1fr; margin-top:10px">
+    <div class="card"><canvas id="eqChart" height="110"></canvas></div>
+    <div class="card"><canvas id="pnlChart" height="110"></canvas></div>
+  </div>
+
+  <div class="grid tables">
+    <div class="card">
+      <div class="label">Open Positions</div>
+      <table><thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>SL</th><th>TP</th><th>Qty</th><th>Lev</th><th>PnL USDT</th><th>PnL %</th></tr></thead><tbody id="positions"></tbody></table>
+    </div>
+    <div class="card"><div class="label">Engine Events</div><div class="log" id="events"></div></div>
+  </div>
+
+<script>
+for(let i=1;i<=125;i++){const o=document.createElement('option');o.value=i;o.textContent=i+'x';leverage.appendChild(o)}
+
+const eqChart = new Chart(document.getElementById('eqChart'), {type:'line', data:{labels:[],datasets:[{label:'Equity Curve',data:[],borderColor:'#60a5fa'}]}, options:{plugins:{legend:{display:false}},scales:{x:{display:false}}}});
+const pnlChart = new Chart(document.getElementById('pnlChart'), {type:'bar', data:{labels:[],datasets:[{label:'PnL History',data:[],backgroundColor:'#22c55e'}]}, options:{plugins:{legend:{display:false}},scales:{x:{display:false}}}});
+
+async function loadConfig(){
+  const c = await (await fetch('/api/config')).json();
+  leverage.value = c.leverage_default || 5;
+  symbolLimit.value = c.symbol_limit || 40;
+  minVol.value = c.min_quote_volume_usdt || 15000000;
+  status.textContent = `API loaded: ${c.has_api_key?'YES':'NO'} | Testnet: ${c.binance_testnet?'YES':'NO'}`;
+}
+
+async function setMode(mode){
+  const j = await (await fetch('/api/mode/'+mode,{method:'POST'})).json();
+  status.textContent = j.ok ? `Mode switched to ${j.mode}` : `Error: ${j.error}`;
+}
+
+async function saveConfig(){
+  const payload = {
+    leverage_default: Number(leverage.value),
+    symbol_limit: Number(symbolLimit.value),
+    min_quote_volume_usdt: Number(minVol.value),
+    api_key: apiKey.value.trim() || undefined,
+    api_secret: apiSecret.value.trim() || undefined,
+  };
+  const j = await (await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})).json();
+  status.textContent = j.ok ? 'Configuration saved' : `Error: ${j.error}`;
+  apiSecret.value = '';
+}
+
+function num(v){return Number(v||0)}
+function fmt(v){return num(v).toFixed(2)}
+
+function render(s){
+  mode.textContent = s.mode;
+  equityTotal.textContent = fmt(s.equity_total);
+  realizedPnl.textContent = fmt(s.realized_pnl);
+  floatingPnl.textContent = fmt(s.floating_pnl);
+  ops.textContent = `${s.open_positions} / ${s.universe_size}`;
+
+  const a = s.analytics || {};
+  wrdd.textContent = `${fmt(a.winrate)}% / ${fmt(a.max_drawdown_usdt)}`;
+
+  eqChart.data.labels = (a.equity_curve||[]).map((_,i)=>i+1);
+  eqChart.data.datasets[0].data = a.equity_curve||[];
+  eqChart.update('none');
+
+  pnlChart.data.labels = (a.pnl_history||[]).map((_,i)=>i+1);
+  pnlChart.data.datasets[0].data = a.pnl_history||[];
+  pnlChart.data.datasets[0].backgroundColor = (a.pnl_history||[]).map(x=>x>=0?'#22c55e':'#ef4444');
+  pnlChart.update('none');
+
+  positions.innerHTML = (s.positions||[]).map(p=>{
+    const c = num(p.unrealized_pnl)>=0?'good':'bad';
+    return `<tr><td>${p.symbol}</td><td>${p.side}</td><td>${fmt(p.entry_price)}</td><td>${fmt(p.stop_loss)}</td><td>${fmt(p.take_profit)}</td><td>${num(p.qty).toFixed(4)}</td><td>${p.leverage}x</td><td class="${c}">${fmt(p.unrealized_pnl)}</td><td class="${c}">${fmt(p.unrealized_pnl_pct)}%</td></tr>`;
+  }).join('');
+
+  events.innerHTML = (s.events||[]).slice(-80).reverse().map(e=>`<div>${e}</div>`).join('');
+}
+
+function connectWs(){
+  const ws = new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws/state');
+  ws.onmessage = ev => render(JSON.parse(ev.data));
+  ws.onclose = () => setTimeout(connectWs, 1500);
+}
+
+loadConfig();
+connectWs();
+</script>
+</body>
+</html>

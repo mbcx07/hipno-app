@@ -1,0 +1,16 @@
+{
+  "name": "Hipno App",
+  "short_name": "Hipno",
+  "description": "App de hipnosis con frecuencias binaurales",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#1a1a2e",
+  "theme_color": "#1a1a2e",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    }
+  ]
+}

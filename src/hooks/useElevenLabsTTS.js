@@ -1,25 +1,44 @@
 import { useState, useCallback, useRef } from 'react'
 
-const OPENAI_API_KEY = 'sk_b841c76ad14633eb9f0ed899bdd9d79cede6ae512a4dd43b'
-
-// Voces disponibles en OpenAI TTS
-export const OPENAI_VOICES = [
-  { id: 'nova', name: 'Nova', description: 'Femenina, cálida - Ideal para hipnosis', gender: 'femenina' },
-  { id: 'shimmer', name: 'Shimmer', description: 'Femenina, suave', gender: 'femenina' },
-  { id: 'alloy', name: 'Alloy', description: 'Neutra, balanceada', gender: 'neutra' },
-  { id: 'echo', name: 'Echo', description: 'Masculina, profunda', gender: 'masculina' },
-  { id: 'fable', name: 'Fable', description: 'Narrativa, expresiva', gender: 'neutra' },
-  { id: 'onyx', name: 'Onyx', description: 'Masculina, grave', gender: 'masculina' }
-]
+const ELEVENLABS_API_KEY = 'sk_b841c76ad14633eb9f0ed899bdd9d79cede6ae512a4dd43b'
 
 // Texto de prueba para preview
 const PREVIEW_TEXT = "Hola, esta es una muestra de cómo suena esta voz. Relájate y respira profundamente."
 
-export function useOpenAITTS() {
+export function useElevenLabsTTS() {
   const [isSpeaking, setIsSpeaking] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState(null)
+  const [voices, setVoices] = useState([])
   const audioRef = useRef(null)
+
+  // Cargar voces disponibles
+  const loadVoices = useCallback(async () => {
+    try {
+      const response = await fetch('https://api.elevenlabs.io/v1/voices', {
+        headers: {
+          'xi-api-key': ELEVENLABS_API_KEY
+        }
+      })
+      
+      if (!response.ok) throw new Error('Error cargando voces')
+      
+      const data = await response.json()
+      const formattedVoices = data.voices.map(v => ({
+        id: v.voice_id,
+        name: v.name,
+        labels: v.labels || {},
+        preview_url: v.preview_url
+      }))
+      
+      setVoices(formattedVoices)
+      return formattedVoices
+    } catch (err) {
+      console.error('Error loading voices:', err)
+      setError(err.message)
+      return []
+    }
+  }, [])
 
   const speak = useCallback(async (text, options = {}) => {
     if (!text.trim()) return
@@ -33,23 +52,29 @@ export function useOpenAITTS() {
     setIsLoading(true)
     setError(null)
 
-    const voice = options.voice || 'nova'
+    const voiceId = options.voice || '21m00Tcm4TlvDq8ikWAM' // Rachel por defecto
     const speed = options.speed || 0.85
 
     try {
-      console.log('OpenAI TTS: Generating audio...', { voice, speed, textLength: text.length })
+      console.log('ElevenLabs TTS: Generating audio...', { voiceId, speed, textLength: text.length })
       
-      const response = await fetch('https://api.openai.com/v1/audio/speech', {
+      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${OPENAI_API_KEY}`,
-          'Content-Type': 'application/json'
+          'xi-api-key': ELEVENLABS_API_KEY,
+          'Content-Type': 'application/json',
+          'Accept': 'audio/mpeg'
         },
         body: JSON.stringify({
-          model: 'tts-1',
-          input: text,
-          voice: voice,
-          speed: speed
+          text: text,
+          model_id: 'eleven_multilingual_v2',
+          voice_settings: {
+            stability: 0.5,
+            similarity_boost: 0.75,
+            style: 0.3,
+            use_speaker_boost: true,
+            speed: speed
+          }
         })
       })
 
@@ -58,7 +83,7 @@ export function useOpenAITTS() {
         let errorMessage = `Error ${response.status}`
         try {
           const errorJson = JSON.parse(errorText)
-          errorMessage = errorJson.error?.message || errorMessage
+          errorMessage = errorJson.detail?.message || errorJson.detail || errorMessage
         } catch (e) {
           errorMessage = errorText || errorMessage
         }
@@ -95,7 +120,7 @@ export function useOpenAITTS() {
       setIsLoading(false)
       setIsSpeaking(false)
       setError(err.message)
-      console.error('OpenAI TTS error:', err)
+      console.error('ElevenLabs TTS error:', err)
       throw err
     }
   }, [])
@@ -122,9 +147,10 @@ export function useOpenAITTS() {
     speak,
     stop,
     previewVoice,
+    loadVoices,
     isSpeaking,
     isLoading,
     error,
-    voices: OPENAI_VOICES
+    voices
   }
 }

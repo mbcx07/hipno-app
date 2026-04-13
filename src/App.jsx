@@ -1,32 +1,38 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useBinauralAudio, BINAURAL_PRESETS } from './hooks/useBinaural'
-import { useOpenAITTS, OPENAI_VOICES } from './hooks/useOpenAITTS'
+import { useElevenLabsTTS } from './hooks/useElevenLabsTTS'
 import { useSessions } from './hooks/useSessions'
 
 function App() {
   // Estados principales
   const [text, setText] = useState('')
-  const [binauralPreset, setBinauralPreset] = useState('theta')
+  const [binauralPreset, setBinauralPreset] = useState('theta_6')
   const [binauralVolume, setBinauralVolume] = useState(0.3)
-  const [preDelay, setPreDelay] = useState(30) // segundos antes del texto
-  const [postDelay, setPostDelay] = useState(60) // segundos después del texto
-  const [voiceSpeed, setVoiceSpeed] = useState(0.85) // Velocidad de voz (0.25 a 4.0)
-  const [selectedVoice, setSelectedVoice] = useState('nova') // Voz por defecto
+  const [preDelay, setPreDelay] = useState(30)
+  const [postDelay, setPostDelay] = useState(60)
+  const [voiceSpeed, setVoiceSpeed] = useState(0.85)
+  const [selectedVoice, setSelectedVoice] = useState('')
   const [isPlaying, setIsPlaying] = useState(false)
-  const [phase, setPhase] = useState('idle') // idle, pre, speaking, post
+  const [phase, setPhase] = useState('idle')
   const [timeRemaining, setTimeRemaining] = useState(0)
   const [sessionName, setSessionName] = useState('')
   const [showSaveModal, setShowSaveModal] = useState(false)
   const [currentSessionId, setCurrentSessionId] = useState(null)
+  const [previewingVoice, setPreviewingVoice] = useState(null)
 
   // Hooks personalizados
   const { startBinaural, stopBinaural } = useBinauralAudio()
-  const { speak: speakOpenAI, stop: stopOpenAI, isSpeaking: isOpenAISpeaking, isLoading, error: openAIError } = useOpenAITTS()
+  const { speak, stop: stopTTS, previewVoice, loadVoices, isSpeaking: isTTSPlaying, isLoading, error: ttsError, voices } = useElevenLabsTTS()
   const { sessions, createSession, updateSession, deleteSession, getSession } = useSessions()
 
   // Referencias para timers
   const timerRef = useRef(null)
   const phaseRef = useRef('idle')
+
+  // Cargar voces al iniciar
+  useEffect(() => {
+    loadVoices()
+  }, [loadVoices])
 
   // Limpiar timers al desmontar
   useEffect(() => {
@@ -39,10 +45,10 @@ function App() {
 
   // Mostrar errores
   useEffect(() => {
-    if (openAIError) {
-      alert(`Error: ${openAIError}`)
+    if (ttsError) {
+      alert(`Error TTS: ${ttsError}`)
     }
-  }, [openAIError])
+  }, [ttsError])
 
   // Iniciar contador regresivo
   const startTimer = useCallback((seconds, onComplete) => {
@@ -58,10 +64,25 @@ function App() {
     }, 1000)
   }, [])
 
+  // Preview de voz
+  const handlePreviewVoice = useCallback(async (voiceId) => {
+    setPreviewingVoice(voiceId)
+    try {
+      await previewVoice(voiceId)
+    } finally {
+      setPreviewingVoice(null)
+    }
+  }, [previewVoice])
+
   // Iniciar sesión completa
   const startSession = useCallback(async () => {
     if (!text.trim()) {
       alert('Por favor escribe un texto para la sesión')
+      return
+    }
+
+    if (!selectedVoice) {
+      alert('Por favor selecciona una voz')
       return
     }
 
@@ -73,21 +94,28 @@ function App() {
     startBinaural(binauralPreset, binauralVolume)
 
     // Fase 2: Esperar preDelay segundos antes de hablar
-    startTimer(preDelay, () => {
+    startTimer(preDelay, async () => {
       phaseRef.current = 'speaking'
       setPhase('speaking')
 
-      // Fase 3: Hablar el texto con OpenAI TTS
-      speakOpenAI(text, {
-        voice: selectedVoice,
-        speed: voiceSpeed
-      })
+      // Fase 3: Hablar el texto con ElevenLabs TTS
+      try {
+        await speak(text, {
+          voice: selectedVoice,
+          speed: voiceSpeed
+        })
+      } catch (e) {
+        console.error('Error en TTS:', e)
+        stopBinaural()
+        setIsPlaying(false)
+        setPhase('idle')
+      }
     })
-  }, [text, binauralPreset, binauralVolume, preDelay, selectedVoice, voiceSpeed, startBinaural, startTimer, speakOpenAI])
+  }, [text, binauralPreset, binauralVolume, preDelay, selectedVoice, voiceSpeed, startBinaural, startTimer, speak, stopBinaural])
 
   // Efecto para detectar cuando termina el TTS
   useEffect(() => {
-    if (!isOpenAISpeaking && !isLoading && phase === 'speaking') {
+    if (!isTTSPlaying && !isLoading && phase === 'speaking') {
       // TTS terminó, iniciar fase post
       phaseRef.current = 'post'
       setPhase('post')
@@ -99,19 +127,19 @@ function App() {
         setTimeRemaining(0)
       })
     }
-  }, [isOpenAISpeaking, isLoading, phase, postDelay, startTimer, stopBinaural])
+  }, [isTTSPlaying, isLoading, phase, postDelay, startTimer, stopBinaural])
 
   // Detener todo
   const stopSession = useCallback(() => {
     if (timerRef.current) {
       clearInterval(timerRef.current)
     }
-    stopOpenAI()
+    stopTTS()
     stopBinaural()
     setIsPlaying(false)
     setPhase('idle')
     setTimeRemaining(0)
-  }, [stopOpenAI, stopBinaural])
+  }, [stopTTS, stopBinaural])
 
   // Guardar sesión
   const handleSaveSession = useCallback(() => {
@@ -131,7 +159,7 @@ function App() {
         preDelay,
         postDelay,
         voiceSpeed,
-        voiceName: selectedVoice
+        voiceId: selectedVoice
       }
     )
     setCurrentSessionId(session.id)
@@ -142,12 +170,12 @@ function App() {
   // Cargar sesión existente
   const loadSession = useCallback((session) => {
     setText(session.text)
-    setBinauralPreset(session.settings?.binauralPreset || 'theta')
+    setBinauralPreset(session.settings?.binauralPreset || 'theta_6')
     setPreDelay(session.settings?.preDelay || 30)
     setPostDelay(session.settings?.postDelay || 60)
     setVoiceSpeed(session.settings?.voiceSpeed || 0.85)
-    if (session.settings?.voiceName) {
-      setSelectedVoice(session.settings.voiceName)
+    if (session.settings?.voiceId) {
+      setSelectedVoice(session.settings.voiceId)
     }
     setCurrentSessionId(session.id)
   }, [])
@@ -158,6 +186,14 @@ function App() {
     const secs = seconds % 60
     return `${mins}:${secs.toString().padStart(2, '0')}`
   }
+
+  // Agrupar presets por tipo de onda
+  const groupedPresets = Object.entries(BINAURAL_PRESETS).reduce((acc, [key, preset]) => {
+    const type = key.split('_')[0]
+    if (!acc[type]) acc[type] = []
+    acc[type].push({ key, ...preset })
+    return acc
+  }, {})
 
   return (
     <div className="container">
@@ -215,7 +251,7 @@ Ejemplo:
 
       {/* Controles de audio binaural */}
       <div className="card">
-        <h2>🎵 Frecuencia binaural</h2>
+        <h2>🎵 Frecuencia binaural (exacta)</h2>
         <div className="controls">
           <div className="control-group">
             <label>Tipo de onda</label>
@@ -225,15 +261,38 @@ Ejemplo:
                 onChange={(e) => setBinauralPreset(e.target.value)}
                 disabled={isPlaying}
               >
-                {Object.entries(BINAURAL_PRESETS).map(([key, preset]) => (
-                  <option key={key} value={key}>
-                    {preset.name}
-                  </option>
-                ))}
+                <optgroup label="🛏️ Delta (Sueño profundo)">
+                  {groupedPresets.delta?.map(preset => (
+                    <option key={preset.key} value={preset.key}>
+                      {preset.name} - {preset.description}
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="🧘 Theta (Hipnosis/Meditación)">
+                  {groupedPresets.theta?.map(preset => (
+                    <option key={preset.key} value={preset.key}>
+                      {preset.name} - {preset.description}
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="😌 Alpha (Relajación)">
+                  {groupedPresets.alpha?.map(preset => (
+                    <option key={preset.key} value={preset.key}>
+                      {preset.name} - {preset.description}
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="🎯 Beta (Concentración)">
+                  {groupedPresets.beta?.map(preset => (
+                    <option key={preset.key} value={preset.key}>
+                      {preset.name} - {preset.description}
+                    </option>
+                  ))}
+                </optgroup>
               </select>
             </div>
             <small style={{ color: '#888', marginTop: '5px', display: 'block' }}>
-              {BINAURAL_PRESETS[binauralPreset]?.description}
+              Frecuencia: {BINAURAL_PRESETS[binauralPreset]?.beatFreq} Hz - {BINAURAL_PRESETS[binauralPreset]?.description}
             </small>
           </div>
 
@@ -281,28 +340,36 @@ Ejemplo:
         </div>
       </div>
 
-      {/* Controles de voz OpenAI */}
+      {/* Controles de voz ElevenLabs */}
       <div className="card">
-        <h2>🎙️ Voz natural (OpenAI TTS)</h2>
+        <h2>🎙️ Voz natural (ElevenLabs)</h2>
         <div className="controls">
           <div className="control-group">
-            <label>Voz</label>
+            <label>Voz {voices.length > 0 && `(${voices.length} disponibles)`}</label>
             <div className="select-wrapper">
               <select
                 value={selectedVoice}
                 onChange={(e) => setSelectedVoice(e.target.value)}
                 disabled={isPlaying}
               >
-                {OPENAI_VOICES.map((voice) => (
+                <option value="">Seleccionar voz...</option>
+                {voices.map((voice) => (
                   <option key={voice.id} value={voice.id}>
-                    {voice.name} - {voice.description}
+                    {voice.name} {voice.labels?.accent ? `(${voice.labels.accent})` : ''}
                   </option>
                 ))}
               </select>
             </div>
-            <small style={{ color: '#888', marginTop: '5px', display: 'block' }}>
-              Recomendado: Nova (femenina, cálida) o Echo (masculina)
-            </small>
+            {selectedVoice && (
+              <button
+                className="btn-secondary"
+                onClick={() => handlePreviewVoice(selectedVoice)}
+                disabled={isPlaying || previewingVoice === selectedVoice}
+                style={{ marginTop: '10px', width: '100%' }}
+              >
+                {previewingVoice === selectedVoice ? '🔊 Reproduciendo...' : '🎧 Escuchar preview'}
+              </button>
+            )}
           </div>
 
           <div className="control-group">
@@ -326,7 +393,11 @@ Ejemplo:
       {/* Botones de control */}
       <div className="buttons">
         {!isPlaying ? (
-          <button className="btn-primary" onClick={startSession} disabled={isLoading}>
+          <button 
+            className="btn-primary" 
+            onClick={startSession} 
+            disabled={isLoading || !selectedVoice || !text.trim()}
+          >
             {isLoading ? '⏳ Generando...' : '▶️ Iniciar sesión'}
           </button>
         ) : (

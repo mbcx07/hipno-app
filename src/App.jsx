@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useBinauralAudio, BINAURAL_PRESETS } from './hooks/useBinaural'
-import { useTTS } from './hooks/useTTS'
+import { useOpenAITTS, OPENAI_VOICES } from './hooks/useOpenAITTS'
 import { useSessions } from './hooks/useSessions'
 
 function App() {
@@ -10,9 +10,8 @@ function App() {
   const [binauralVolume, setBinauralVolume] = useState(0.3)
   const [preDelay, setPreDelay] = useState(30) // segundos antes del texto
   const [postDelay, setPostDelay] = useState(60) // segundos después del texto
-  const [voiceRate, setVoiceRate] = useState(0.8)
-  const [selectedVoice, setSelectedVoice] = useState(null)
-  const [voices, setVoices] = useState([])
+  const [voiceSpeed, setVoiceSpeed] = useState(0.85) // Velocidad de voz (0.25 a 4.0)
+  const [selectedVoice, setSelectedVoice] = useState('nova') // Voz por defecto
   const [isPlaying, setIsPlaying] = useState(false)
   const [phase, setPhase] = useState('idle') // idle, pre, speaking, post
   const [timeRemaining, setTimeRemaining] = useState(0)
@@ -21,33 +20,13 @@ function App() {
   const [currentSessionId, setCurrentSessionId] = useState(null)
 
   // Hooks personalizados
-  const { startBinaural, stopBinaural, setVolume } = useBinauralAudio()
-  const { speak, stop: stopTTS, getVoices, isSpeaking } = useTTS()
+  const { startBinaural, stopBinaural } = useBinauralAudio()
+  const { speak: speakOpenAI, stop: stopOpenAI, isSpeaking: isOpenAISpeaking, isLoading, error: openAIError } = useOpenAITTS()
   const { sessions, createSession, updateSession, deleteSession, getSession } = useSessions()
 
   // Referencias para timers
   const timerRef = useRef(null)
   const phaseRef = useRef('idle')
-
-  // Cargar voces disponibles
-  useEffect(() => {
-    const loadVoices = () => {
-      const availableVoices = getVoices()
-      if (availableVoices.length > 0) {
-        setVoices(availableVoices)
-        // Seleccionar voz en español por defecto
-        const spanishVoice = availableVoices.find(v => v.lang.startsWith('es'))
-        if (spanishVoice) setSelectedVoice(spanishVoice)
-      }
-    }
-
-    loadVoices()
-    window.speechSynthesis.onvoiceschanged = loadVoices
-
-    return () => {
-      window.speechSynthesis.onvoiceschanged = null
-    }
-  }, [getVoices])
 
   // Limpiar timers al desmontar
   useEffect(() => {
@@ -57,6 +36,13 @@ function App() {
       }
     }
   }, [])
+
+  // Mostrar errores
+  useEffect(() => {
+    if (openAIError) {
+      alert(`Error: ${openAIError}`)
+    }
+  }, [openAIError])
 
   // Iniciar contador regresivo
   const startTimer = useCallback((seconds, onComplete) => {
@@ -73,7 +59,7 @@ function App() {
   }, [])
 
   // Iniciar sesión completa
-  const startSession = useCallback(() => {
+  const startSession = useCallback(async () => {
     if (!text.trim()) {
       alert('Por favor escribe un texto para la sesión')
       return
@@ -91,18 +77,17 @@ function App() {
       phaseRef.current = 'speaking'
       setPhase('speaking')
 
-      // Fase 3: Hablar el texto
-      speak(text, {
+      // Fase 3: Hablar el texto con OpenAI TTS
+      speakOpenAI(text, {
         voice: selectedVoice,
-        rate: voiceRate,
-        pitch: 0.9
+        speed: voiceSpeed
       })
     })
-  }, [text, binauralPreset, binauralVolume, preDelay, selectedVoice, voiceRate, startBinaural, startTimer, speak])
+  }, [text, binauralPreset, binauralVolume, preDelay, selectedVoice, voiceSpeed, startBinaural, startTimer, speakOpenAI])
 
   // Efecto para detectar cuando termina el TTS
   useEffect(() => {
-    if (!isSpeaking && phase === 'speaking') {
+    if (!isOpenAISpeaking && !isLoading && phase === 'speaking') {
       // TTS terminó, iniciar fase post
       phaseRef.current = 'post'
       setPhase('post')
@@ -114,19 +99,19 @@ function App() {
         setTimeRemaining(0)
       })
     }
-  }, [isSpeaking, phase, postDelay, startTimer, stopBinaural])
+  }, [isOpenAISpeaking, isLoading, phase, postDelay, startTimer, stopBinaural])
 
   // Detener todo
   const stopSession = useCallback(() => {
     if (timerRef.current) {
       clearInterval(timerRef.current)
     }
-    stopTTS()
+    stopOpenAI()
     stopBinaural()
     setIsPlaying(false)
     setPhase('idle')
     setTimeRemaining(0)
-  }, [stopTTS, stopBinaural])
+  }, [stopOpenAI, stopBinaural])
 
   // Guardar sesión
   const handleSaveSession = useCallback(() => {
@@ -145,14 +130,14 @@ function App() {
         binauralPreset,
         preDelay,
         postDelay,
-        voiceRate,
-        voiceName: selectedVoice?.name
+        voiceSpeed,
+        voiceName: selectedVoice
       }
     )
     setCurrentSessionId(session.id)
     setShowSaveModal(false)
     setSessionName('')
-  }, [createSession, sessionName, sessions.length, text, binauralPreset, preDelay, postDelay, voiceRate, selectedVoice])
+  }, [createSession, sessionName, sessions.length, text, binauralPreset, preDelay, postDelay, voiceSpeed, selectedVoice])
 
   // Cargar sesión existente
   const loadSession = useCallback((session) => {
@@ -160,13 +145,12 @@ function App() {
     setBinauralPreset(session.settings?.binauralPreset || 'theta')
     setPreDelay(session.settings?.preDelay || 30)
     setPostDelay(session.settings?.postDelay || 60)
-    setVoiceRate(session.settings?.voiceRate || 0.8)
+    setVoiceSpeed(session.settings?.voiceSpeed || 0.85)
     if (session.settings?.voiceName) {
-      const voice = voices.find(v => v.name === session.settings.voiceName)
-      if (voice) setSelectedVoice(voice)
+      setSelectedVoice(session.settings.voiceName)
     }
     setCurrentSessionId(session.id)
-  }, [voices])
+  }, [])
 
   // Formatear tiempo
   const formatTime = (seconds) => {
@@ -188,13 +172,13 @@ function App() {
           <div className="status">
             <div className={`status-icon ${isPlaying ? 'playing' : 'stopped'}`}>
               {phase === 'pre' && '⏳'}
-              {phase === 'speaking' && '🎙️'}
+              {phase === 'speaking' && (isLoading ? '⏳' : '🎙️')}
               {phase === 'post' && '🎵'}
             </div>
             <div className="status-text">
               <h3>
                 {phase === 'pre' && 'Preparando relajación...'}
-                {phase === 'speaking' && 'Reproduciendo sesión...'}
+                {phase === 'speaking' && (isLoading ? 'Generando audio...' : 'Reproduciendo sesión...')}
                 {phase === 'post' && 'Profundizando estado...'}
               </h3>
               <p>
@@ -248,7 +232,7 @@ Ejemplo:
                 ))}
               </select>
             </div>
-            <small style={{ color: '#666', marginTop: '5px' }}>
+            <small style={{ color: '#888', marginTop: '5px', display: 'block' }}>
               {BINAURAL_PRESETS[binauralPreset]?.description}
             </small>
           </div>
@@ -297,44 +281,44 @@ Ejemplo:
         </div>
       </div>
 
-      {/* Controles de voz */}
+      {/* Controles de voz OpenAI */}
       <div className="card">
-        <h2>🎙️ Voz</h2>
+        <h2>🎙️ Voz natural (OpenAI TTS)</h2>
         <div className="controls">
           <div className="control-group">
             <label>Voz</label>
             <div className="select-wrapper">
               <select
-                value={selectedVoice?.name || ''}
-                onChange={(e) => {
-                  const voice = voices.find(v => v.name === e.target.value)
-                  setSelectedVoice(voice)
-                }}
+                value={selectedVoice}
+                onChange={(e) => setSelectedVoice(e.target.value)}
                 disabled={isPlaying}
               >
-                <option value="">Seleccionar voz</option>
-                {voices
-                  .filter(v => v.lang.startsWith('es'))
-                  .map((voice) => (
-                    <option key={voice.name} value={voice.name}>
-                      {voice.name} ({voice.lang})
-                    </option>
-                  ))}
+                {OPENAI_VOICES.map((voice) => (
+                  <option key={voice.id} value={voice.id}>
+                    {voice.name} - {voice.description}
+                  </option>
+                ))}
               </select>
             </div>
+            <small style={{ color: '#888', marginTop: '5px', display: 'block' }}>
+              Recomendado: Nova (femenina, cálida) o Echo (masculina)
+            </small>
           </div>
 
           <div className="control-group">
-            <label>Velocidad: {voiceRate}x</label>
+            <label>Velocidad: {voiceSpeed}x</label>
             <input
               type="range"
               min="0.5"
               max="1.5"
-              step="0.1"
-              value={voiceRate}
-              onChange={(e) => setVoiceRate(Number(e.target.value))}
+              step="0.05"
+              value={voiceSpeed}
+              onChange={(e) => setVoiceSpeed(Number(e.target.value))}
               disabled={isPlaying}
             />
+            <small style={{ color: '#888', marginTop: '5px', display: 'block' }}>
+              0.85x = más lento y relajante
+            </small>
           </div>
         </div>
       </div>
@@ -342,8 +326,8 @@ Ejemplo:
       {/* Botones de control */}
       <div className="buttons">
         {!isPlaying ? (
-          <button className="btn-primary" onClick={startSession}>
-            ▶️ Iniciar sesión
+          <button className="btn-primary" onClick={startSession} disabled={isLoading}>
+            {isLoading ? '⏳ Generando...' : '▶️ Iniciar sesión'}
           </button>
         ) : (
           <button className="btn-stop" onClick={stopSession}>
